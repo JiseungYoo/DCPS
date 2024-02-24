@@ -40,10 +40,8 @@ enrollment_student.school.year <-
   read_excel(excel_file, sheet = "Enrollment and Attendance")
 
 courses_student.school.year <-   
-  map(
-    map_vec(c(19:22), ~glue("Courses SY{.x}-{.x+1}")),
-    ~read_excel(excel_file, sheet = .x),
-  ) %>% 
+  map(map_vec(c(19:22), ~glue("Courses SY{.x}-{.x+1}")),
+      ~excel_file %>% read_excel(sheet = .x)) %>% 
   list_rbind()
 
 tests_student.year <- 
@@ -77,7 +75,6 @@ primary_teacher <-
 
 
 ## clean test scores ----
-
 assessments_student.year %<>%
   mutate(etime = case_match(Assessment_Window,
                             "BOY" ~ "f", "MOY" ~ "m", "EOY" ~ "s", .default = NULL),
@@ -88,14 +85,12 @@ assessments_student.year %<>%
               values_from = c(pb, ss), names_glue = "s_{tname}_{.value}_{etime}") %>% 
   select(-contains("TRC_ss")) %>% 
   mutate(across(contains("_pb_"), ~case_match(.x, 
-                                              c("Below Basic", "Well Below Benchmark", "Far Below Proficient") ~ 1, 
-                                              c("Basic", "Below Benchmark", "Below Proficient") ~ 2, 
-                                              c("Proficient", "Benchmark", "At Benchmark") ~ 3, 
-                                              c("Advanced", "Above Benchmark", "Above Proficient") ~ 4, 
-                                              .default = NULL)), 
-         across(contains("_ss_"), ~parse_integer(.x)))
-
-
+      c("Below Basic", "Well Below Benchmark", "Far Below Proficient") ~ 1, 
+      c("Basic", "Below Benchmark", "Below Proficient") ~ 2, 
+      c("Proficient", "Benchmark", "At Benchmark") ~ 3, 
+      c("Advanced", "Above Benchmark", "Above Proficient") ~ 4, 
+      .default = NULL)), 
+      across(contains("_ss_"), ~parse_integer(.x)))
 
 ## merge and reformat ----
 
