@@ -115,6 +115,8 @@ supplemental_english_titles <- c(
   glue("AVID Grade {6:8}") # this isn't specifically literacy but I found their website
 )
 
+
+supplemental_english_titles
 english_takers  <- 
   df %>% 
   filter(Grade %in% 6:8, Title %in% english_course_titles) %$%
@@ -197,9 +199,13 @@ english_courses.student_year %>%
   facet_grid(rows = vars(Grade), cols = vars(year))
 
 df %>% 
-  filter(Grade %in% 6:8, !StudentID %in% english_8_takers) %>%
+  filter(Grade %in% 6:8, !StudentID %in% english_takers) %>%
   group_by(school_id) %>% 
   count(StudentID) %>% view()
 # core courses always seem to have the FY term_code
 # also, there seems to be a few options for typical and honors english
 # 
+
+# look at test RI or DIBELS scores to see if heterogeneity in quantiles
+# try to see if we can connect the supplemental course titles to specific literacy programs
+# (stari, DC reading clinic, etc. )
