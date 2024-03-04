@@ -181,7 +181,7 @@ collapse_unique <- function(x, sep = "; ") {
 english_courses.student_year <- 
   df %>% 
   filter(Grade %in% 6:8, Title %in% c(english_course_titles, supplemental_english_titles)) %>%
-  mutate(weight = case_match(Term_Code, c("FY" ,"FYCB", "FYCB") ~ 1,
+  mutate(weight = case_match(Term_Code, c("FY" ,"FYCB") ~ 1,
       glue("S{1:2}") ~ .5, glue("T{1:4}")~ .25, .default = NA),
       core_title = ifelse(Title %in% english_course_titles, Title, ""),
       supp_title = ifelse(Title %in% supplemental_english_titles, Title, "")) %>% 
