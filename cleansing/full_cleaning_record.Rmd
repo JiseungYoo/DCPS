@@ -50,8 +50,6 @@ assessments_student.year <-
   read_excel(excel_file, sheet = "Formative Assessments") %>% 
   filter(Assessment_Type %in% c("DIBELS", "RI", "TRC")) 
 
-
-
 ## Determine Primary Teacher ----
 mode_stat <- function(x, na.rm = TRUE) {
   if(na.rm) x = x[!is.na(x)]
@@ -88,7 +86,6 @@ assessments_student.year %<>%
       across(contains("_ss_"), ~parse_integer(.x)))
 
 ## merge and reformat ----
-
 df <- enrollment_student.school.year %>% 
   group_by(StudentID, SchoolYearStart) %>% 
   filter(Membership_Days==max(Membership_Days)) %>% 
@@ -145,7 +142,7 @@ names(df) <- str_to_lower(names(df))
 
 df_max <- df
 
-language_teacher <- 
+df_js <- 
   courses_student.school.year %>% 
   group_by(StudentID, Grade, School, courses_sy_start) %>%
   filter(grepl("Elementary|language|english|reading|writing|literacy", Title, ignore.case = TRUE))%>%
@@ -159,14 +156,12 @@ language_teacher <-
     usi = StudentID,
     s_grade = Grade,
     schoolid1 = school_id,
-    language_teacher= lan_teacher)
+    language_teacher= lan_teacher) %>% 
+  right_join(
+    df_max, join_by(usi, s_grade, schoolyear_fall, schoolid1))
 
 
 ## rename and merge ----
-
-df_js <- dfmax %>% 
-  left_join(
-    language_teacher, join_by(usi, s_grade, schoolyear_fall, schoolid1))
 
 
 df_js_sd <- df_js %>%
@@ -212,14 +207,9 @@ observation_data <-
 
 observation_data <- observation_data %>%
   rename(employeeid = DCPSTeacherID)%>%
-  filter(!is.na(employeeid))
-
-observation_data$schoolyear_fall <- 2021
-
-observation_data <- observation_data %>%
+  filter(!is.na(employeeid)) %>% 
+  mutate(schoolyear_fall = 2021) %>% 
   arrange(employeeid, schoolyear_fall)
-
-str(observation_data)
 
 merged_df <- observation_data %>%
   left_join(df_js_sd, by = c("employeeid", "schoolyear_fall"))
