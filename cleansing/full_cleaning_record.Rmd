@@ -30,7 +30,7 @@ c("tidyverse", "magrittr", "rlang", "glue",
 Main Data Source comes from Excel sheet
 
 ```{r Clean Student Data}
-excel_file <- file.path( working_directory, 
+excel_file <- file.path( box_directory, "Data", "Raw",  
                          "Student Data through SY22-23 Updated.xlsx") 
 demog_student.year <-
   read_excel(excel_file, sheet = "Demographic")
@@ -152,19 +152,12 @@ df_js <-
   mutate(Grade = ifelse(str_trim(Grade) == "K", "0", Grade) %>% parse_double()) %>% 
   rename(
     schoolyear_fall = courses_sy_start,
-    school_id = School,
+    schoolid1 = School,
     usi = StudentID,
     s_grade = Grade,
-    schoolid1 = school_id,
     language_teacher= lan_teacher) %>% 
   right_join(
-    df_max, join_by(usi, s_grade, schoolyear_fall, schoolid1))
-
-
-## rename and merge ----
-
-
-df_js_sd <- df_js %>%
+    df_max, join_by(usi, s_grade, schoolyear_fall, schoolid1)) %>%
   group_by(schoolyear_fall, s_grade) %>%
   mutate(across(
     c(s_dibels_ss_s, s_dibels_ss_f, s_dibels_ss_m,
@@ -193,58 +186,246 @@ df_js_sd <- df_js %>%
       employeeid = as.numeric(employeeid))
   
 
-df_js_sd %>%
-  filter(s_grade %in% c(0:8)) %>% 
-  write_dta( file.path(working_directory, "student_level_js.dta"))
+# df_js_sd %>%
+#   filter(s_grade %in% c(0:8)) %>% 
+#   write_dta( file.path(working_directory, "student_level_js.dta"))
 
-# Model specification
+```
 
-## import SERP ---- 
+
+```{r add observation scores}
 observation_data <-
-  file.path( working_directory, 
-             "DCPS_Observation Data_charts_0124_js.xlsx") %>%  
-  read_excel(sheet = "Data_Transposed")
+  file.path( box_directory, "Data", "Raw", "SERP Classroom Observations",
+             "DCPS_Observation Data_charts_0124.xlsx") %>%  
+  read_excel() %>% t() %>% as_tibble()
 
-observation_data <- observation_data %>%
-  rename(employeeid = DCPSTeacherID)%>%
+names(observation_data) <- observation_data[3,] %>% as_vector() %>%
+  str_replace_all(" ", "_")
+
+names(observation_data)[is.na(names(observation_data))] <- "unknown"
+
+observation_data[-c(1:3),] %>% 
+  rename(employeeid = DCPS_Teacher_ID) %>%
   filter(!is.na(employeeid)) %>% 
-  mutate(schoolyear_fall = 2021) %>% 
-  arrange(employeeid, schoolyear_fall)
+  mutate(schoolyear_fall = 2021, employeeid = parse_double(employeeid)) %>% 
+  arrange(employeeid, schoolyear_fall) %>% 
+  left_join(df_js, by = c("employeeid", "schoolyear_fall"))
+```
 
-merged_df <- observation_data %>%
-  left_join(df_js_sd, by = c("employeeid", "schoolyear_fall"))
+
+```{r declare relevant vectors}
+english_course_titles <- c(glue("English {6:8}"), glue("Advanced English {6:8}"), 
+  glue("Pre-AP English {6:8}"), glue("English FT {6:8}"),
+  glue("English & Humanities {6:8}"),
+  "English I", "Language, Culture and Literacy", glue("Language Arts {6:8}"),
+  "English as a Second Language I", "English as a Second Language II",
+  "IB MYP English II") # does Journalism count??
+
+supplemental_english_titles <- c(
+  glue("Reading Resource MS{6:8}"),
+  glue("Reading Workshop {c(6:8, 'MS')}"),
+  "Reading Support MS",
+  "Newc Engl Lit Devt MS", "Newc Oral LangDevt MS",
+  "Beginning ESL MS", "Intermed ESL MS", "Advanced ESL MS",
+  "Extended Literacy MS",
+  "Reading Lab", "LL: Miixed-Model Reading MS7",
+  glue("LL: Mixed-Model Reading MS{6:8}"),
+  glue("AVID Grade {6:8}") # this isn't specifically literacy but I found their website
+)
+
+unrelated_subject_codes <- 
+  c("ADM", "ART", "CARR", "CTE", "EE", "FL", "MAT", "MU", "NULL", NULL, "PE",
+    "SCI", "SS", "WL")
+
+stari_schools <- c(347, 404, 454, 405, 407, 413, 1071, 435, 416, 428)
+# 347 Brookland
+# 404 Browne
+# 454 Cardozo
+# 405 Deal
+# 407 Eliot
+# 413 Hart
+# 1071 Ida B (Wells)
+# 435 Mckinley
+# 416 Johnson
+# 428 Stuart-Hobson
 ```
 
 
 
+```{r merge stari}
+STARI <- 
+  file.path(box_directory, "Data", "Raw", "STARI") %>% 
+  list.files(pattern = "\\.xlsx$", full.names = TRUE) %>% 
+  map(~{read_excel(.x) %>% as_tibble()})
+
+schools_teacher_list <- STARI[[2]] %>% filter(Grade!="9th-12th") %$% unique(School)
 
 
-```{r load data}
-excel_file <- file.path( working_directory,
-                         "Student Data through SY22-23 Updated.xlsx")
+sheets <- file.path(box_directory, "Data", "Raw", "STARI") %>% 
+  list.files(pattern = "\\.xlsx$", full.names = TRUE) %>% 
+  .[1] %>% 
+  excel_sheets()
 
-courses_student.school.year <-   
-  map(map_vec(c(19:22), ~glue("Courses SY{.x}-{.x+1}")),
-      ~excel_file %>% read_excel(sheet = .x)) %>% 
+map()
+
+STARI[[1]] %>% view()
+
+STARI[[2]] %>% filter(Grade!="9th-12th") 
+# it looks like there is Wells MS in teacher and "Ida B Wells MSS" in combined
+
+schools_combined_sheets <- map(3:8,~STARI[[.x]] %$% unique(SCHOOL_NAME)) %>% list_c() %>% unique() 
+
+setdiff(schools_teacher_list, schools_combined_sheets) %>% 
+c(
+  setdiff(schools_combined_sheets, schools_teacher_list)
+)
+
+binder <- 
+  file.path(box_directory, "Data", "Raw", "STARI", "binder_info.xlsx") %>% 
+  read_excel() %>% 
+  mutate()
+
+binder$Teacher
+
+school_cross_walk <- file.path(box_directory, "Data", "Raw", "School Names IDS.xlsx") %>% 
+  read_excel() 
+
+clean_names <- function(data) {
+  data %>% 
+    pull(Teacher) %>% 
+    str_to_lower() %>% 
+    str_replace_all("['_]", "") %>% 
+    unique() %>% 
+    unlist()
+}
+
+stari_teacher <- clean_names(binder) %>% 
+c(clean_names(STARI[[2]] %>% filter(Grade!="9th-12th"))) %>% 
+  unique()
+binder %>% view()
+
+school_cross_walk %>% filter()
+
+courses_student.school.year %>% 
+    pull(Teacher) %>% 
+    str_to_lower() %>% 
+    str_replace_all("['_,]", "") %>% 
+    unlist()
+    
+
+teachers <- stari_schools %>% 
+  map(~{
+    courses_student.school.year %>% 
+      filter(School==.x, courses_sy_start==2022,
+             Title %in% supplemental_english_titles) %>% 
+      select(School, Title, Section, Teacher, Grade, Employee_Number) %>% 
+      group_by(School, Teacher, Grade) %>% 
+      reframe(School = first(School), 
+              Title = first(Title), 
+              Section = first(Section), 
+              Teacher = first(Teacher), 
+              Grade = first(Grade),
+              Employee_Number = first(Employee_Number))
+  }) %>%
   list_rbind() %>% 
-  rename(year = courses_sy_start) %>% 
-  mutate(Grade = ifelse(str_trim(Grade) == "K", "0", Grade) %>% parse_double())
+  select(Teacher, Employee_Number)
 
-# restricting data to only look at student's main school 
-df <- 
-  read_excel(excel_file, sheet = "Enrollment and Attendance") %>% 
-  group_by(StudentID, SchoolYearStart) %>% 
-  filter(Membership_Days==max(Membership_Days)) %>% 
-  reframe(Grade = min(ifelse(str_trim(Grade) == "K", "0", Grade) %>%
-                        parse_double(), na.rm = TRUE),
-          school_id = min(School_ID, na.rm = TRUE), 
-          s_days_enrolled = max(Membership_Days)) %>% 
-  rename(year = SchoolYearStart) %>%
-  inner_join(courses_student.school.year, 
-             join_by(StudentID, Grade, year, school_id == School),
-             relationship = "one-to-many")
+teachers %>% 
+  mutate(
+    name1 = Teacher %>% str_replace_all("-", " ") %>% str_replace_all(",", "") %>% word(1),
+    name2 = Teacher %>% str_replace_all("-", " ") %>% str_replace_all(",", "") %>% word(2),
+    name3 = Teacher %>% str_replace_all("-", " ") %>% str_replace_all(",", "") %>% word(3),
+    name4 = Teacher %>% str_replace_all("-", " ") %>% str_replace_all(",", "") %>% word(4),
+    name5 = Teacher %>% str_replace_all("-", " ") %>% str_replace_all(",", "") %>% word(5)
+  ) %>% 
+  pmap_df(function(...) {
+    sort(c(...), na.last = TRUE)
+  }) %>% 
 
-# student_year.rds -> school_year_max + sd test score -> uploaded this file to Box (Mar 4)
-studentdf <- readRDS("school_year.rds", refhook = NULL)
+
+library(tidyverse)
+
+teachers %>% 
+  mutate(
+    names = str_replace_all(Teacher, "-", " ") %>% 
+            str_replace_all(",", "") %>% 
+            str_split(" ") %>% 
+            map(~sort(.x))
+  ) %>%
+  mutate(
+    name1 = word(names, 1),
+    name2 = word(names, 2),
+    name3 = word(names, 3),
+    name4 = word(names, 4),
+    name5 = word(names, 5)
+  )
+  
+teachers %>% 
+  mutate(
+    names = str_replace_all(Teacher, "-", " ") %>% 
+            str_replace_all(",", "") %>% 
+    str_split(" ") %>% 
+    map(sort) %>%
+    unlist()) %>% 
+  mutate(
+    name1 = word(names, 1),
+    name2 = word(names, 2),
+    name3 = word(names, 3),
+    name4 = word(names, 4),
+    name5 = word(names, 5)
+  )
+  
+%>% 
+  str_split(" ")
+
+%>% 
+  str_replace_all("[ ,\\/]", "")
+
+clean_names <- function(data, col_name) {
+  data %>% 
+    mutate(name1 = str_extract())
+}
+
+courses_student.school.year %>% names()
+courses_student.school.year %>%
+  mutate(Teacher = clean_names(., "Teacher"))
+  filter(Title %in% supplemental_english_titles,
+         Teacher)
+
+tab_schools_combined <- map(3:8, ~STARI[[.x]] %>% count(SCHOOL_NAME)) %>% list_rbind()
+tab_schools_combined %>% view()
+
+tab_schools_combined %>% 
+  reframe(total = sum(n)) %>% 
+  view()
+
+sc
+# so I guess the question here is 
+#This data is from 22-23 school year  
+  
+studentdf <- df_js %>% 
+  filter(s_grade %in% 6:8) %>%
+  group_by(usi, s_grade, schoolid1, schoolyear_fall) %>%
+  mutate(engscore = (s_dibels_ss_sd_f + s_sri_ss_sd_f) / 2) %>%
+  ungroup()
+
+results <- 
+  map(supplemental_english_titles, 
+    ~ {courses_student.school.year %>%
+        group_by(Grade, School, courses_sy_start) %>%
+        reframe(percentage_students = 
+          n_distinct(StudentID[Title == .x]) / n_distinct(StudentID)*100) %>% 
+        filter(percentage_students!=0) %>% 
+        mutate(Title = .x)
+    }) %>% 
+  list_rbind() %>% 
+  pivot_wider(names_from = Title, values_from = percentage_students) %>% 
+  as_tibble()
+
+results %>% 
+  filter(School %in% stari_schools) %>% 
+  view()
+
+
 ```
 
