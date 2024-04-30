@@ -226,7 +226,7 @@ english_course_titles <- c(glue("English {6:8}"), glue("Advanced English {6:8}")
   glue("English & Humanities {6:8}"),
   "English I", "Language, Culture and Literacy", glue("Language Arts {6:8}"),
   "English as a Second Language I", "English as a Second Language II",
-  "IB MYP English II") # does Journalism count??
+  "IB MYP English II", "Journalism MS") # does Journalism count??
 
 supplemental_english_titles <- c(
   glue("Reading Resource MS{6:8}"),
@@ -373,7 +373,12 @@ stari_stdents_school_match <-
 raw_test_score <- 
   assessments_student.year %>%
   filter(School_Year_Start == 2022, Grade %in% 6:8) %>% 
-  select(StudentID, Grade, s_sri_ss_f, s_sri_ss_m, s_sri_ss_s) 
+  select(StudentID, School_Year_Start, Grade, s_sri_ss_f, s_sri_ss_m, s_sri_ss_s) %>%
+  left_join(
+    assessments_student.year %>%
+      filter(School_Year_Start == 2021, Grade %in% 5:8) %>%
+      mutate(diagnostic_ri = s_sri_ss_s) %>% 
+      select(StudentID, diagnostic_ri) %>% distinct(), join_by(StudentID))
 ```
 
 
@@ -383,10 +388,8 @@ course_df <-
   filter(courses_sy_start == 2022, Grade %in% c('6', '7', '8'),
          School %in% stari_schools, 
          Employee_Number %in% stari_teachers) %>%
-  mutate(Grade = parse_number(Grade)) %>% 
-  group_by(StudentID, Title, Section, Grade, Term_Code) %>% 
-  distinct() %>% 
-  ungroup()
+  mutate(Grade = parse_number(Grade))
+  
 
 stari_df <- 
   course_df %>%
@@ -397,6 +400,9 @@ stari_df <-
   by = names(course_df) , relationship = "one-to-one") %>%
   mutate(stari_students_matched = ifelse(is.na(stari_students_matched), 0, stari_students_matched)) %>% 
   left_join(raw_test_score, join_by(StudentID, Grade))
+
+
+
 ```
 
 
@@ -451,6 +457,9 @@ stari_df %>%
   geom_col(position = "dodge") +
   facet_wrap(~School)
 
+stari_df %>% 
+  count(School) %>% 
+  arrange(n)
 
 stari_df %>%
   filter(Subject_Code == "ERL", !Title %in% english_course_titles) %>% 
@@ -464,7 +473,6 @@ stari_df %>%
   geom_col(position = "dodge") +
   facet_wrap(~School)
 
-
 stari_df %>%
   filter(Subject_Code == "ERL", !Title %in% english_course_titles) %>% 
   group_by(Title, Section, Term_Code, Grade, School, Employee_Number) %>%
@@ -473,15 +481,102 @@ stari_df %>%
   mutate(naive_percent = ifelse(stari_naive == 0, 0, naive_percent)) %>% 
   reframe( n = sum(n), naive_percent = max(naive_percent)) %>% 
   ungroup() %>% 
-full_join(
-stari_df %>%
-  filter(Subject_Code == "ERL", !Title %in% english_course_titles) %>% 
-  group_by(Title, Section, Term_Code, Grade, School, Employee_Number) %>% 
-  count(stari_students_matched) %>% 
-  mutate(matched_percent = n/sum(n)) %>%
-  mutate(matched_percent = ifelse(stari_students_matched == 0, 0, matched_percent)) %>% 
-  reframe(n = sum(n), matched_percent = max(matched_percent)) %>% 
-  ungroup(),
-join_by(Title, Section, Term_Code, Grade, School, Employee_Number, n)) %>% 
+  full_join(
+    stari_df %>%
+    filter(Subject_Code == "ERL", !Title %in% english_course_titles) %>% 
+    group_by(Title, Section, Term_Code, Grade, School, Employee_Number) %>% 
+    count(stari_students_matched) %>% 
+    mutate(matched_percent = n/sum(n)) %>%
+    mutate(matched_percent = ifelse(stari_students_matched == 0, 0, matched_percent)) %>% 
+    reframe(n = sum(n), matched_percent = max(matched_percent)) %>% 
+    ungroup(),
+  join_by(Title, Section, Term_Code, Grade, School, Employee_Number, n)) %>% 
   gt()
 ```
+
+```{r}
+stari_df %>% 
+  filter(Subject_Code == "ERL", !Title %in% english_course_titles) %>% 
+  count(School, stari_naive)
+
+
+courses_student.school.year %>% 
+  filter(courses_sy_start == 2022, Grade %in% c('6', '7', '8'),
+         School %in% stari_schools[-454]) %>%
+  mutate(Grade = parse_number(Grade),
+         stari_naive = ifelse(StudentID %in% stari_students_naive, 1, 0))  %>% 
+  filter(Subject_Code == "ERL", !Title %in% english_course_titles) %>% 
+  count(School, stari_naive)
+
+# By school calculate percent of supplemental courses that we deem STARI
+courses_student.school.year %>% 
+  filter(courses_sy_start == 2022, Grade %in% c('6', '7', '8'),
+         School %in% stari_schools) %>%
+  mutate(Grade = parse_number(Grade),
+         stari_naive = ifelse(StudentID %in% stari_students_naive, 1, 0))  %>% 
+  filter(Subject_Code == "ERL", !Title %in% english_course_titles) %>% 
+  group_by(School, Title, Section, Employee_Number, Grade) %>%
+  reframe(percent_naive = mean(stari_naive, na.rm = TRUE),
+          n_students =  n()) %>%
+  ungroup() %>%
+  mutate(suspected_stari = ifelse(
+    (percent_naive > .5) #& (Employee_Number %in% stari_teachers) # removing stari teacher check only affects Browne EC (404)
+    , 1, 0)) %>% 
+  group_by(School, Grade) %>% 
+  reframe(percent_stari_sections = mean(suspected_stari, na.rm = TRUE) %>% round(4)*100,
+          n_sections = n(),
+          n_stari_sections = sum(suspected_stari, na.rm = TRUE),
+          n_students = sum(n_students, na.rm = TRUE)) %>% 
+  left_join(stari_schools_tibble %>% rename(School = schoolid1, school_nm= School), join_by(School))
+
+course_level_stari <- 
+  courses_student.school.year %>% 
+  filter(courses_sy_start == 2022, Grade %in% c('6', '7', '8'),
+         School %in% stari_schools) %>%
+  mutate(Grade = parse_number(Grade),
+         stari_naive = ifelse(StudentID %in% stari_students_naive, 1, 0))  %>% 
+  filter(Subject_Code == "ERL", !Title %in% english_course_titles) %>% 
+  group_by(School, Title, Section, Employee_Number, Grade) %>%
+  reframe(percent_naive = mean(stari_naive, na.rm = TRUE),
+          n_students =  n()) %>%
+  ungroup() %>%
+  select(School, Title, Section, Employee_Number, percent_naive) %>% 
+  mutate(suspected_stari = ifelse(
+    (percent_naive > .5) #& (Employee_Number %in% stari_teachers) # removing stari teacher check only affects Browne EC (404)
+    , 1, 0)) %>% 
+  distinct()
+
+df <- 
+  courses_student.school.year %>% 
+  filter(courses_sy_start == 2022, Grade %in% c('6', '7', '8'),
+         School %in% stari_schools) %>%
+  mutate(Grade = parse_number(Grade),
+         stari_naive = ifelse(StudentID %in% stari_students_naive, 1, 0))  %>% 
+  filter(Subject_Code == "ERL", !Title %in% english_course_titles) %>% 
+  left_join(raw_test_score, join_by(StudentID, Grade, courses_sy_start == School_Year_Start)) %>%
+  select(StudentID, Grade, School, Title, Section, Employee_Number, Term_Code, stari_naive, s_sri_ss_f, diagnostic_ri) %>% 
+  left_join(course_level_stari, join_by(School, Title, Section, Employee_Number))
+
+
+df %>%
+  filter(!School %in% c(1071, 454, 435)) %>% 
+  group_by(StudentID) %>% 
+  reframe(Grade = max(Grade),
+          School = first(School),
+          diagnostic_ri = max(diagnostic_ri),
+          s_sri_ss_f = max(s_sri_ss_f),
+          stari_naive = max(stari_naive),
+          percent_naive= max(percent_naive)) %>%
+  mutate(student_type = ifelse(percent_naive > 0.5, "stari", "non-stari")) %>%
+  filter(!is.na(s_sri_ss_f)) %>%
+  # count(stari_naive, student_type) %>% 
+  ggplot(aes(x = s_sri_ss_f, fill = student_type)) +
+  geom_histogram(position = "identity", alpha = 0.5, bins = 30) +
+  facet_grid(School ~ Grade) +
+  theme_minimal() +
+  labs(x = "Diagnostic RI", y = "Count", fill = "Student Type") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  geom_segment(x = 800, y = 0, yend = 12, xend = 800)
+
+```
+
