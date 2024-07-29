@@ -1,0 +1,583 @@
+---
+title: "DC Data Cleaning Record"
+author: "Max Anthenelli and Jiseung Yoo"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+
+```{R env setting}
+knitr::opts_chunk$set(echo = TRUE)
+
+working_directory <- file.path("C:", "Users", "Max", "Documents", "GitHub",
+                             "DCPS")
+#working_directory <- file.path("/Users/jiseungyoo/Desktop/WORK/DCPS/files")
+
+box_directory <- file.path(working_directory, "..", "..", "..", 
+                           "Box", "DCPS-SERP Data Internal 2019")
+
+setwd(working_directory)
+setwd(working_directory)
+
+#getwd()
+## choose required packages ----
+c("tidyverse", "magrittr", "rlang", "glue",
+  "haven", "labelled", "writexl",
+  "gt", "gtsummary", "webshot2", 'readxl',
+  "scales", "grid", "ggtext", "patchwork"
+)  |>
+  purrr::walk(~{
+    if (!require(.x, character.only = TRUE)) {
+      install.packages(.x)
+      require(.x, character.only = TRUE)
+    }
+  })
+```
+
+
+
+```{r Load Student Data, warning=FALSE}
+excel_file <- file.path( box_directory, "Data", "Raw",  
+                         "Student Data through SY22-23 Updated.xlsx") 
+demog_student.year <-
+  read_excel(excel_file, sheet = "Demographic")
+
+enrollment_student.school.year <- 
+  read_excel(excel_file, sheet = "Enrollment and Attendance")
+
+courses_student.school.year <-   
+  map(map_vec(c(19:22), ~glue("Courses SY{.x}-{.x+1}")),
+      ~excel_file %>% read_excel(sheet = .x)) %>% 
+  list_rbind()
+
+tests_student.year <- 
+  read_excel(excel_file, sheet = "PARCC")
+
+assessments_student.year <-
+  read_excel(excel_file, sheet = "Formative Assessments") %>% 
+  filter(Assessment_Type %in% c("DIBELS", "RI", "TRC")) 
+```
+
+
+``` {r clean student data, include = FALSE}
+## Determine Primary Teacher ----
+mode_stat <- function(x, na.rm = TRUE) {
+  if(na.rm) x = x[!is.na(x)]
+  ux <- unique(x)
+  return(ux[which.max(tabulate(match(x, ux)))])
+}
+
+primary_teacher <- 
+  courses_student.school.year %>% 
+  group_by(StudentID, Grade, School, courses_sy_start) %>%
+  mutate(Employee_Number = ifelse(any(Subject_Code == "EE"),
+                                  mode_stat(Employee_Number[Subject_Code == "EE"]), Employee_Number)) %>%
+  reframe(main_teacher = mode_stat(Employee_Number)) %>% 
+  ungroup() %>% 
+  mutate(Grade = ifelse(str_trim(Grade) == "K", "0", Grade) %>% parse_double()) %>% 
+  rename(year = courses_sy_start, school_id = School)
+
+## clean test scores ----
+assessments_student.year %<>%
+  mutate(etime = case_match(Assessment_Window,
+                            "BOY" ~ "f", "MOY" ~ "m", "EOY" ~ "s", .default = NULL),
+         tname = ifelse(Assessment_Type == "RI", "sri", Assessment_Type)) %>%
+  rename(pb = Proficiency_Level, ss = Proficiency_Score) %>%
+  select(-Assessment_Window, -Assessment_Type) %>% 
+  pivot_wider(names_from = c(tname, etime), 
+              values_from = c(pb, ss), names_glue = "s_{tname}_{.value}_{etime}") %>% 
+  select(-contains("TRC_ss")) %>% 
+  mutate(across(contains("_pb_"), ~case_match(.x, 
+      c("Below Basic", "Well Below Benchmark", "Far Below Proficient") ~ 1, 
+      c("Basic", "Below Benchmark", "Below Proficient") ~ 2, 
+      c("Proficient", "Benchmark", "At Benchmark") ~ 3, 
+      c("Advanced", "Above Benchmark", "Above Proficient") ~ 4, 
+      .default = NULL)), 
+      across(contains("_ss_"), ~parse_integer(.x)))
+
+## merge and reformat ----
+df <- enrollment_student.school.year %>% 
+  group_by(StudentID, SchoolYearStart) %>% 
+  filter(Membership_Days==max(Membership_Days)) %>% 
+  reframe(Grade = min(ifelse(str_trim(Grade) == "K", "0", Grade) %>% parse_double(), na.rm = TRUE),
+          school_id = min(School_ID, na.rm = TRUE), 
+          s_days_enrolled = max(Membership_Days)) %>% 
+  rename(year = SchoolYearStart) %>% 
+  left_join(
+    tests_student.year %>% rename(Grade = student_Grade),
+    join_by(StudentID, Grade), relationship = "many-to-many") %>% 
+  left_join(
+    primary_teacher, join_by(StudentID, Grade, year, school_id), relationship = "many-to-many"
+  ) %>% 
+  left_join(demog_student.year %>% 
+              mutate(Grade = ifelse(str_trim(Grade) == "K", "0", Grade) %>% parse_double()) %>%
+              rename(year = School_Year_Start), join_by(StudentID, Grade, year)) %>% 
+  left_join(assessments_student.year %>% 
+              rename(year = School_Year_Start), join_by(StudentID, Grade, year)) %>%
+  mutate(s_race = case_match(Race_Ethnicity,
+                             "American Indian or Alaska Native" ~ 1,
+                             "Asian" ~ 2,
+                             "Black or African American" ~ 3,
+                             "Hispanic/Latino" ~ 4,
+                             "Two or More Races" ~ 5,
+                             "White" ~ 6, .default = NULL),
+         s_female = case_match(Gender, "F" ~ 1, "M" ~ 0, .default = NULL),
+         s_sped = case_match(SPED, "Y" ~ 1, "N" ~ 0, .default = NULL),
+         s_lep = case_match(EL_Indicator, "Yes" ~ 1, "No" ~ 0, .default = NULL),
+         ela_test_grade = case_when(str_starts(ela_testcode, "ELA")
+                                    ~ parse_number(str_remove(math_testcode, "ELA")), .default = NULL),
+         math_test_grade = case_when(str_starts(ela_testcode, "MAT")
+                                     ~ parse_number(str_remove(ela_testcode, "MAT")), .default = NULL),
+         employeeid = parse_number(main_teacher)) %>% 
+  rename(
+    usi = StudentID,
+    schoolyear_fall = year,
+    s_grade = Grade,
+    schoolid1 = school_id,
+    s_parcc_pb_ela = ela_perf_level,
+    s_parcc_ss_ela = ela_scale_score,
+    s_parcc_pb_math = math_perf_level,
+    s_parcc_ss_math = math_scale_score,
+    birthdate = Birth_Date
+  ) %>% 
+  select(usi, schoolyear_fall, s_grade, schoolid1, ela_test_grade, 
+         s_parcc_pb_ela, s_parcc_ss_ela, math_test_grade, s_parcc_pb_math,
+         s_parcc_ss_math, employeeid, s_female, s_race,
+         birthdate, s_lep, s_sped, s_days_enrolled, s_DIBELS_pb_s, 
+         s_DIBELS_pb_f, s_DIBELS_pb_m, s_TRC_pb_s, s_TRC_pb_f, s_TRC_pb_m,
+         s_sri_pb_s, s_sri_pb_m, s_sri_pb_f, s_DIBELS_ss_s, s_DIBELS_ss_f, 
+         s_DIBELS_ss_m, s_sri_ss_s, s_sri_ss_m, s_sri_ss_f)
+
+names(df) <- str_to_lower(names(df))
+
+df_max <- df
+
+df_js <- 
+  courses_student.school.year %>% 
+  group_by(StudentID, Grade, School, courses_sy_start) %>%
+  filter(grepl("Elementary|language|english|reading|writing|literacy", Title, ignore.case = TRUE))%>%
+  filter(!grepl("computer|spanish|native|latin|arabic|financial", Title, ignore.case = TRUE))  %>%
+  reframe(lan_teacher = mode_stat(Employee_Number)) %>% 
+  ungroup() %>% 
+  mutate(Grade = ifelse(str_trim(Grade) == "K", "0", Grade) %>% parse_double()) %>% 
+  rename(
+    schoolyear_fall = courses_sy_start,
+    schoolid1 = School,
+    usi = StudentID,
+    s_grade = Grade,
+    language_teacher= lan_teacher) %>% 
+  right_join(
+    df_max, join_by(usi, s_grade, schoolyear_fall, schoolid1)) %>%
+  group_by(schoolyear_fall, s_grade) %>%
+  mutate(across(
+    c(s_dibels_ss_s, s_dibels_ss_f, s_dibels_ss_m,
+      s_sri_ss_s, s_sri_ss_m, s_sri_ss_f),
+    ~ scale(., center = TRUE, scale = TRUE),
+    .names = "{.col}_sd"
+  )) %>%
+  ungroup() %>%
+  rename(
+    s_dibels_ss_sd_s= s_dibels_ss_s_sd, 
+    s_dibels_ss_sd_f= s_dibels_ss_f_sd, 
+    s_dibels_ss_sd_m= s_dibels_ss_m_sd, 
+    s_sri_ss_sd_s= s_sri_ss_s_sd, 
+    s_sri_ss_sd_m= s_sri_ss_m_sd, 
+    s_sri_ss_sd_f= s_sri_ss_f_sd,
+    teacherid = employeeid,
+    employeeid = language_teacher
+    ) %>% ### switch teacher main - language
+  mutate(
+      s_white = as.integer(s_race == "6"),
+      s_black = as.integer(s_race == "3"),
+      s_native_american = as.integer(s_race == "1"),
+      s_asian = as.integer(s_race == "2"),
+      s_latinx = as.integer(s_race == "4"),
+      s_race_multi_other = as.integer(s_race == "5"),
+      employeeid = as.numeric(employeeid))
+  
+
+# df_js_sd %>%
+#   filter(s_grade %in% c(0:8)) %>% 
+#   write_dta( file.path(working_directory, "student_level_js.dta"))
+
+```
+
+```{r save}
+write_dta(df_max, file.path(working_directory, "student_level.dta"))
+write_dta(df_js, file.path(working_directory, "student_level_sd.dta"))
+```
+             
+
+```{r add observation scores}
+observation_data <-
+  file.path( box_directory, "Data", "Raw", "SERP Classroom Observations",
+             "DCPS_Observation Data_charts_0124.xlsx") %>%  
+  read_excel() %>% t() %>% as_tibble()
+
+names(observation_data) <- observation_data[3,] %>% as_vector() %>%
+  str_replace_all(" ", "_")
+
+names(observation_data)[is.na(names(observation_data))] <- "unknown"
+
+observation_data[-c(1:3),] %>% 
+  rename(employeeid = DCPS_Teacher_ID) %>%
+  filter(!is.na(employeeid)) %>% 
+  mutate(schoolyear_fall = 2021, employeeid = parse_double(employeeid)) %>% 
+  arrange(employeeid, schoolyear_fall) %>% 
+  left_join(df_js, by = c("employeeid", "schoolyear_fall"))
+```
+
+
+
+```{r declare relevant vectors}
+
+english_course_titles <- c(glue("English {6:8}"), glue("Advanced English {6:8}"), 
+  glue("Pre-AP English {6:8}"), glue("English FT {6:8}"),
+  glue("English & Humanities {6:8}"),
+  "English I", "Language, Culture and Literacy", glue("Language Arts {6:8}"),
+  "English as a Second Language I", "English as a Second Language II",
+  "IB MYP English II") # does Journalism count??
+
+supplemental_english_titles <- c(
+  glue("Reading Resource MS{6:8}"),
+  glue("Reading Workshop {c(6:8, 'MS')}"),
+  "Reading Support MS",
+  "Newc Engl Lit Devt MS", "Newc Oral LangDevt MS",
+  "Beginning ESL MS", "Intermed ESL MS", "Advanced ESL MS",
+  "Extended Literacy MS",
+  "Reading Lab", "LL: Miixed-Model Reading MS7",
+  glue("LL: Mixed-Model Reading MS{6:8}"),
+  glue("AVID Grade {6:8}") # this isn't specifically literacy but I found their website
+)
+
+unrelated_subject_codes <- 
+  c("ADM", "ART", "CARR", "CTE", "EE", "FL", "MAT", "MU", "NULL", NULL, "PE",
+    "SCI", "SS", "WL")
+
+stari_school_id <- c(347, 404, 454, 405, 407, 413, 1071, 435, 416, 428)
+# 347 Brookland
+# 404 Browne
+# 454 Cardozo
+# 405 Deal
+# 407 Eliot
+# 413 Hart
+# 1071 Ida B (Wells)
+# 435 Mckinley
+# 416 Johnson
+# 428 Stuart-Hobson
+
+stari_schools <- 
+  c(
+    'Brookland MS' = 347,
+    'Browne EC' = 404,
+    'Cardozo EC' = 454,
+    'Deal MS' = 405,
+    'Eliot-Hine MS' = 407,
+    'Hart MS' = 413,
+    'Johnson' = 416,
+    'Mckinley' = 435,
+    'Stuart-Hobson MS' = 428,
+    'Wells' = 1071
+  )
+
+stari_schools_tibble <- tibble(
+  School = names(stari_schools),
+  schoolid1 = stari_schools
+)
+```
+
+
+
+```{r fancy function, include = FALSE}
+
+split_names <- function(data, name_var, order, first_name_var = "first_name", last_name_var = "last_name", other_names_var = "other_names") {
+  
+  if (!all(c("F", "L", "M") %in% strsplit(order, "")[[1]]) || length(strsplit(order, "")[[1]]) != 3) {
+    stop("order must contain, L, M, and F with no spaces")
+  }
+  
+  if (any(is.na(data[[name_var]]))) {
+    stop("missing values in name_var")
+  }
+  
+  data %>% 
+    mutate(
+      name_split = str_replace_all(!!rlang::sym(name_var), "[^\\w\\s-]", "") %>% 
+        str_to_lower() %>% 
+        str_split(" ") %>%
+        map(function(x) {
+          if (length(x) == 1) {
+            warning("no spaces in value(s) of name_var")
+            return(c(NA, x, NA))
+          } else if (length(x) == 2) {
+            if (which(strsplit(order, "")[[1]] == "L") < which(strsplit(order, "")[[1]] == "F")) {
+              return(c(x[1], x[2], NA))
+            } else {
+              return(c(x[2], x[1], NA))
+            }
+          } else {
+            names_order <- match(c("L", "F", "M"), strsplit(order, "")[[1]])
+            x <- x[names_order]
+            return(x)
+          }
+        }),
+      !!last_name_var := map_chr(name_split, function(x) if(length(na.omit(x)) >= 1) x[1] else NA),
+      !!first_name_var := map_chr(name_split, function(x) if(length(na.omit(x)) >= 2) x[2] else NA),
+      !!other_names_var := map_chr(name_split, function(x) if(length(na.omit(x)) > 2) paste(sort(x[3:(length(x))]), collapse = " ") else NA)
+    ) %>% 
+    select(-name_split)
+}
+```
+
+
+```{r identify stari teachers}
+
+STARI <- 
+  file.path(box_directory, "Data", "Raw", "STARI", "STARI_student") %>% 
+  list.files(pattern = "\\.xlsx$", full.names = TRUE) %>% 
+  map(~{read_excel(.x) %>% as_tibble()})
+
+binder <- 
+  file.path(box_directory, "Data", "Raw", "STARI", "binder_info.xlsx") %>% 
+  read_excel()
+
+given_stari_teachers <- 
+  file.path(box_directory, "Data", "Raw", "STARI", "STARI Teachers.xlsx") %>% 
+  read_excel() %>%
+  filter(Grade != "9th-12th") %>%
+  left_join(stari_schools_tibble, join_by(School))
+
+
+binder_and_given_teachers <- 
+  split_names(binder, "Teacher", order = "FML") %>% 
+  full_join(split_names(given_stari_teachers, "Teacher", order = "FML"),
+            join_by(first_name, last_name, other_names, schoolid1)) %>% 
+  select(first_name, last_name, other_names, schoolid1) %>% 
+  mutate(
+      last_name = ifelse(last_name == 'holloway', 'holloway-mcclendon', last_name),
+      first_name = ifelse(first_name == 'ayeisha', 'ayeesha', first_name))
+
+## Celestine Holloway-Mcclendon vs Holloway
+## Ayeesha vs Ayeisha Louis
+# binder_and_given_teachers
+
+stari_teachers <- 
+  split_names(courses_student.school.year %>%
+              filter(courses_sy_start == 2022,
+                     Grade %in% c('6', '7', '8'),
+                     School %in% stari_schools) %>% 
+              select(Teacher, Employee_Number, School),
+            "Teacher", order = "LFM") %>% 
+  inner_join(binder_and_given_teachers,
+    join_by(first_name, last_name, other_names, School == schoolid1)) %>% 
+  distinct() %>% 
+  pull(Employee_Number)
+  
+# stari_teachers
+``` 
+
+
+```{r identify stari students}
+standardize_grade_column <- function(df) {
+  df %>%
+    mutate(GRADE = as.character(GRADE)) # Ensure GRADE is character type
+}
+
+stari_students_naive <- map(1:7, ~ STARI[[.x]] %>% standardize_grade_column()) %>%
+  list_rbind() %>%
+  pull(USER_NAME)
+
+stari_stdents_school_match <- 
+  map(1:7,~STARI[[.x]] %>% standardize_grade_column()) %>%
+  list_rbind() %>%
+  mutate(SCHOOL_NAME = case_match(SCHOOL_NAME,
+    "Elliot-Hine MSS" ~ "Eliot-Hine MS",
+    "Ida B Wells MSS" ~ "Wells",
+    "Hart MSS_1" ~ "Hart MS",
+    .default = SCHOOL_NAME
+       )) %>% 
+  inner_join(stari_schools_tibble, join_by(SCHOOL_NAME == School)) %>%
+  select(USER_NAME, schoolid1, GRADE) %>% 
+  distinct()
+```
+
+
+```{r grab test scores}
+raw_test_score <- 
+  assessments_student.year %>%
+  filter(School_Year_Start == 2022, Grade %in% 6:8) %>% 
+  select(StudentID, School_Year_Start, Grade, s_sri_ss_f, s_sri_ss_m, s_sri_ss_s) %>%
+  left_join(
+    assessments_student.year %>%
+      filter(School_Year_Start == 2021, Grade %in% 5:8) %>%
+      mutate(diagnostic_ri = s_sri_ss_s) %>% 
+      select(StudentID, diagnostic_ri) %>% distinct(), join_by(StudentID))
+```
+
+
+```{r combine stari teachers and students}
+course_df <- 
+  courses_student.school.year %>% 
+  filter(courses_sy_start == 2022, Grade %in% c('6', '7', '8'),
+         School %in% stari_schools, 
+         Employee_Number %in% stari_teachers) %>%
+  mutate(Grade = parse_number(Grade))
+  
+
+stari_stdents_school_match <- stari_stdents_school_match %>%
+  mutate(GRADE = parse_number(as.character(GRADE)))
+
+raw_test_score <- raw_test_score %>%
+  mutate(Grade = parse_number(as.character(Grade)))
+
+stari_df <- 
+  course_df %>%
+  left_join(stari_stdents_school_match %>%  mutate(stari_students_matched = 1), 
+            join_by(School == schoolid1, StudentID == USER_NAME, Grade == GRADE)) %>% 
+  full_join(course_df %>% 
+  mutate(stari_naive = ifelse(StudentID %in% stari_students_naive, 1, 0)),
+  by = names(course_df) , relationship = "one-to-one") %>%
+  mutate(stari_students_matched = ifelse(is.na(stari_students_matched), 0, stari_students_matched)) %>% 
+  left_join(raw_test_score, join_by(StudentID, Grade))
+
+```
+
+
+
+
+```{r generate figures}
+stari_df %>%
+  filter(Subject_Code == "ERL", !Title %in% english_course_titles) %>% 
+  group_by(Title, Section, Term_Code, Grade, School, Employee_Number, stari_naive) %>%
+  reframe(RI = mean(s_sri_ss_f, na.rm = TRUE),
+          n= n()) %>%
+  group_by(Grade, stari_naive, School) %>% 
+  reframe(RI = mean(RI, na.rm = TRUE),
+          n = mean(n)) %>%
+  ggplot(aes(x = Grade, y = RI, color = as.factor(stari_naive))) +
+  geom_col(position = "dodge") +
+  facet_wrap(~School)
+
+stari_df %>% 
+  count(School) %>% 
+  arrange(n)
+
+stari_df %>%
+  filter(Subject_Code == "ERL", !Title %in% english_course_titles) %>% 
+  group_by(Title, Section, Term_Code, Grade, School, Employee_Number, stari_students_matched) %>%
+  reframe(RI = mean(s_sri_ss_f, na.rm = TRUE),
+          n= n()) %>%
+  group_by(Grade, stari_students_matched, School) %>% 
+  reframe(RI = mean(RI, na.rm = TRUE),
+          n = mean(n)) %>%
+  ggplot(aes(x = Grade, y = RI, color = as.factor(stari_students_matched))) +
+  geom_col(position = "dodge") +
+  facet_wrap(~School)
+
+stari_df %>%
+  filter(Subject_Code == "ERL", !Title %in% english_course_titles) %>% 
+  group_by(Title, Section, Term_Code, Grade, School, Employee_Number) %>%
+  count(stari_naive) %>% 
+  mutate(naive_percent = n/sum(n)) %>%
+  mutate(naive_percent = ifelse(stari_naive == 0, 0, naive_percent)) %>% 
+  reframe( n = sum(n), naive_percent = max(naive_percent)) %>% 
+  ungroup() %>% 
+  full_join(
+    stari_df %>%
+    filter(Subject_Code == "ERL", !Title %in% english_course_titles) %>% 
+    group_by(Title, Section, Term_Code, Grade, School, Employee_Number) %>% 
+    count(stari_students_matched) %>% 
+    mutate(matched_percent = n/sum(n)) %>%
+    mutate(matched_percent = ifelse(stari_students_matched == 0, 0, matched_percent)) %>% 
+    reframe(n = sum(n), matched_percent = max(matched_percent)) %>% 
+    ungroup(),
+  join_by(Title, Section, Term_Code, Grade, School, Employee_Number, n)) %>% 
+  gt()
+```
+
+
+```{r}
+stari_df %>% 
+  filter(Subject_Code == "ERL", !Title %in% english_course_titles) %>% 
+  count(School, stari_naive)
+
+
+courses_student.school.year %>% 
+  filter(courses_sy_start == 2022, Grade %in% c('6', '7', '8')) %>%
+  mutate(Grade = parse_number(Grade),
+         stari_naive = ifelse(StudentID %in% stari_students_naive, 1, 0))  %>% 
+  filter(Subject_Code == "ERL", !Title %in% english_course_titles) %>% 
+  count(School, stari_naive)
+
+
+# By school calculate percent of supplemental courses that we deem STARI
+courses_student.school.year %>% 
+  filter(courses_sy_start == 2022, Grade %in% c('6', '7', '8'),
+         School %in% stari_schools) %>%
+  mutate(Grade = parse_number(Grade),
+         stari_naive = ifelse(StudentID %in% stari_students_naive, 1, 0))  %>% 
+  filter(Subject_Code == "ERL", !Title %in% english_course_titles) %>% 
+  group_by(School, Title, Section, Employee_Number, Grade) %>%
+  reframe(percent_naive = mean(stari_naive, na.rm = TRUE),
+          n_students =  n()) %>%
+  ungroup() %>%
+  mutate(suspected_stari = ifelse(
+    (percent_naive > .5) #& (Employee_Number %in% stari_teachers) # removing stari teacher check only affects Browne EC (404)
+    , 1, 0)) %>% 
+  group_by(School, Grade) %>% 
+  reframe(percent_stari_sections = mean(suspected_stari, na.rm = TRUE) %>% round(4)*100,
+          n_sections = n(),
+          n_stari_sections = sum(suspected_stari, na.rm = TRUE),
+          n_students = sum(n_students, na.rm = TRUE)) %>% 
+  left_join(stari_schools_tibble %>% rename(School = schoolid1, school_nm= School), join_by(School))
+
+course_level_stari <- 
+  courses_student.school.year %>% 
+  filter(courses_sy_start == 2022, Grade %in% c('6', '7', '8'),
+         School %in% stari_schools) %>%
+  mutate(Grade = parse_number(Grade),
+         stari_naive = ifelse(StudentID %in% stari_students_naive, 1, 0))  %>% 
+  filter(Subject_Code == "ERL", !Title %in% english_course_titles) %>% 
+  group_by(School, Title, Section, Employee_Number, Grade) %>%
+  reframe(percent_naive = mean(stari_naive, na.rm = TRUE),
+          n_students =  n()) %>%
+  ungroup() %>%
+  select(School, Title, Section, Employee_Number, percent_naive) %>% 
+  mutate(suspected_stari = ifelse(
+    (percent_naive > .5) #& (Employee_Number %in% stari_teachers) # removing stari teacher check only affects Browne EC (404)
+    , 1, 0)) %>% 
+  distinct()
+
+df <- 
+  courses_student.school.year %>% 
+  filter(courses_sy_start == 2022, Grade %in% c('6', '7', '8'),
+         School %in% stari_schools) %>%
+  mutate(Grade = parse_number(Grade),
+         stari_naive = ifelse(StudentID %in% stari_students_naive, 1, 0))  %>% 
+  filter(Subject_Code == "ERL", !Title %in% english_course_titles) %>% 
+  left_join(raw_test_score, join_by(StudentID, Grade, courses_sy_start == School_Year_Start)) %>%
+  select(StudentID, Grade, School, Title, Section, Employee_Number, Term_Code, stari_naive, s_sri_ss_f, diagnostic_ri) %>% 
+  left_join(course_level_stari, join_by(School, Title, Section, Employee_Number))
+
+
+df %>%
+  filter(!School %in% c(428, 435)) %>% 
+  group_by(StudentID) %>% 
+  reframe(Grade = max(Grade),
+          School = first(School),
+          diagnostic_ri = max(diagnostic_ri),
+          s_sri_ss_f = max(s_sri_ss_f),
+          stari_naive = max(stari_naive),
+          percent_naive= max(percent_naive)) %>%
+  mutate(student_type = ifelse(percent_naive > 0.5, "stari", "non-stari")) %>%
+  filter(!is.na(s_sri_ss_f)) %>%
+  # count(stari_naive, student_type) %>% 
+  ggplot(aes(x = s_sri_ss_f, fill = student_type)) +
+  geom_histogram(position = "identity", alpha = 0.5, bins = 30) +
+  facet_grid(School ~ Grade) +
+  theme_minimal() +
+  labs(x = "Diagnostic RI", y = "Count", fill = "Student Type") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  geom_segment(x = 800, y = 0, yend = 12, xend = 800)
+
+```
