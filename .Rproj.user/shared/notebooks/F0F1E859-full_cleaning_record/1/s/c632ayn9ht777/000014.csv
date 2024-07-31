@@ -1,0 +1,11 @@
+"0","raw_test_score <- 
+  assessments_student.year %>%
+  filter(School_Year_Start == 2022, Grade %in% 6:8) %>% 
+  select(StudentID, School_Year_Start, Grade, s_sri_ss_f, s_sri_ss_m, s_sri_ss_s) %>%
+  left_join(
+    assessments_student.year %>%
+      filter(School_Year_Start == 2021, Grade %in% 5:8) %>%
+      mutate(diagnostic_ri = s_sri_ss_s) %>% 
+      select(StudentID, diagnostic_ri) %>% distinct(), join_by(StudentID))
+"
+"2","Warning: Detected an unexpected many-to-many relationship between `x` and `y`."
